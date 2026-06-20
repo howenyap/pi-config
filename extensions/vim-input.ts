@@ -495,9 +495,23 @@ class VimInputEditor extends CustomEditor {
 
 export default function vimInputExtension(pi: ExtensionAPI) {
 	let enabled = true;
+	let currentCtx: ExtensionContext | undefined;
+	let editorMode: Mode = "insert";
+	let overrideMode: Mode | undefined;
+
+	function renderVimStatus(ctx = currentCtx): void {
+		if (!ctx || ctx.mode !== "tui") return;
+		if (!enabled) {
+			ctx.ui.setStatus("vim-input", undefined);
+			return;
+		}
+		const mode = overrideMode ?? editorMode;
+		ctx.ui.setStatus("vim-input", `\x1b[97mVim: ${mode.toUpperCase()}\x1b[39m`);
+	}
 
 	function apply(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
+		currentCtx = ctx;
 		if (!enabled) {
 			ctx.ui.setEditorComponent(undefined);
 			ctx.ui.setStatus("vim-input", undefined);
@@ -505,12 +519,26 @@ export default function vimInputExtension(pi: ExtensionAPI) {
 		}
 
 		const setVimStatus = (mode: Mode) => {
-			ctx.ui.setStatus("vim-input", `\x1b[97mVim: ${mode.toUpperCase()}\x1b[39m`);
+			editorMode = mode;
+			if (!overrideMode) renderVimStatus(ctx);
 		};
 
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimInputEditor(tui, theme, keybindings, setVimStatus));
-		setVimStatus("insert");
+		editorMode = "insert";
+		renderVimStatus(ctx);
 	}
+
+	pi.events.on("vim-input:override-mode", (data) => {
+		if (data === "insert" || data === "normal") {
+			overrideMode = data;
+			renderVimStatus();
+		}
+	});
+
+	pi.events.on("vim-input:clear-override", () => {
+		overrideMode = undefined;
+		renderVimStatus();
+	});
 
 	pi.on("session_start", (_event, ctx) => {
 		apply(ctx);
