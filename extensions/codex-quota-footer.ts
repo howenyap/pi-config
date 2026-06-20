@@ -56,6 +56,15 @@ type UsageResponse = {
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const REFRESH_MS = 60_000;
+const FAST_MODE_MODEL_IDS = new Set(["gpt-5.5", "gpt-5.4"]);
+const FAST_STATE_ENTRY_TYPE = "codex-fast";
+const FAST_STATE_EVENT = "codex-fast:state";
+
+let fastEnabled = true;
+
+function fastAppliesTo(model: any) {
+	return !!model && model.provider === "openai-codex" && FAST_MODE_MODEL_IDS.has(model.id);
+}
 
 export default function (pi: ExtensionAPI) {
 	let quota: QuotaState = {
@@ -77,6 +86,14 @@ export default function (pi: ExtensionAPI) {
 		quota = next;
 		requestRender();
 	}
+
+	pi.events.on(FAST_STATE_EVENT, (data) => {
+		const enabled = (data as { enabled?: unknown } | undefined)?.enabled;
+		if (typeof enabled === "boolean") {
+			fastEnabled = enabled;
+			requestRender();
+		}
+	});
 
 	function scheduleRefresh(ctx: any, delayMs = 0, force = false) {
 		if (disposed) return;
@@ -149,6 +166,18 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+
+		fastEnabled = true;
+		const savedFast = ctx.sessionManager
+			.getEntries()
+			.filter((entry: { type: string; customType?: string }) => {
+				return entry.type === "custom" && entry.customType === FAST_STATE_ENTRY_TYPE;
+			})
+			.pop() as { data?: { enabled?: boolean } } | undefined;
+		if (typeof savedFast?.data?.enabled === "boolean") {
+			fastEnabled = savedFast.data.enabled;
+		}
+
 		if (interval) clearInterval(interval);
 		if (refreshTimeout) clearTimeout(refreshTimeout);
 		disposed = false;
@@ -181,7 +210,12 @@ export default function (pi: ExtensionAPI) {
 					const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no model";
 					const thinking = pi.getThinkingLevel();
 					const left = theme.fg("dim", leftParts.join("  "));
-					const right = `${theme.fg("accent", model)}${theme.fg("dim", ` · thinking ${thinking}`)}`;
+					const rightParts = [
+						...(fastEnabled && fastAppliesTo(ctx.model) ? [theme.fg("text", "fast")] : []),
+						theme.fg("accent", model),
+						theme.fg("dim", `thinking ${thinking}`),
+					];
+					const right = rightParts.join(theme.fg("dim", " · "));
 
 					const statuses = Array.from(footerData.getExtensionStatuses().values()).join("  ");
 					const quotaText = colorQuotaText(theme, quota.text);
