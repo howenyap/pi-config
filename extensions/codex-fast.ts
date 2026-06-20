@@ -42,7 +42,7 @@ export default function (pi: ExtensionAPI) {
 			fastEnabled = saved.data.enabled;
 		}
 
-		// Clear any status/footer artifacts from older versions. The quota footer
+		// Clear any status/footer artifacts from older versions. The status bar
 		// owns footer rendering and listens for STATE_EVENT to show "fast" inline.
 		ctx.ui.setStatus("codex-fast", undefined);
 		publish(pi);

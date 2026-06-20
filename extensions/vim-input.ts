@@ -503,10 +503,12 @@ export default function vimInputExtension(pi: ExtensionAPI) {
 		if (!ctx || ctx.mode !== "tui") return;
 		if (!enabled) {
 			ctx.ui.setStatus("vim-input", undefined);
+			ctx.ui.setStatus("00-vim-input", undefined);
 			return;
 		}
 		const mode = overrideMode ?? editorMode;
-		ctx.ui.setStatus("vim-input", `\x1b[97mVim: ${mode.toUpperCase()}\x1b[39m`);
+		ctx.ui.setStatus("vim-input", undefined);
+		ctx.ui.setStatus("00-vim-input", ctx.ui.theme.fg("text", mode.toUpperCase()));
 	}
 
 	function apply(ctx: ExtensionContext): void {
@@ -515,6 +517,7 @@ export default function vimInputExtension(pi: ExtensionAPI) {
 		if (!enabled) {
 			ctx.ui.setEditorComponent(undefined);
 			ctx.ui.setStatus("vim-input", undefined);
+			ctx.ui.setStatus("00-vim-input", undefined);
 			return;
 		}
 

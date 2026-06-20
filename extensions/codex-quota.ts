@@ -1,7 +1,4 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { basename } from "node:path";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type QuotaSeverity = "dim" | "success" | "warning" | "error";
 
@@ -56,17 +53,9 @@ type UsageResponse = {
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const REFRESH_MS = 60_000;
-const FAST_MODE_MODEL_IDS = new Set(["gpt-5.5", "gpt-5.4"]);
-const FAST_STATE_ENTRY_TYPE = "codex-fast";
-const FAST_STATE_EVENT = "codex-fast:state";
+const QUOTA_STATE_EVENT = "codex-quota:state";
 
-let fastEnabled = true;
-
-function fastAppliesTo(model: any) {
-	return !!model && model.provider === "openai-codex" && FAST_MODE_MODEL_IDS.has(model.id);
-}
-
-export default function (pi: ExtensionAPI) {
+export default function codexQuotaExtension(pi: ExtensionAPI) {
 	let quota: QuotaState = {
 		text: "Codex quota: loading…",
 		severity: "dim",
@@ -74,26 +63,17 @@ export default function (pi: ExtensionAPI) {
 	let inFlight = false;
 	let disposed = false;
 	let lastFetch = 0;
-	let render: (() => void) | undefined;
 	let interval: ReturnType<typeof setInterval> | undefined;
 	let refreshTimeout: ReturnType<typeof setTimeout> | undefined;
 
-	function requestRender() {
-		render?.();
+	function publish() {
+		pi.events.emit(QUOTA_STATE_EVENT, quota);
 	}
 
 	function setQuota(next: QuotaState) {
 		quota = next;
-		requestRender();
+		publish();
 	}
-
-	pi.events.on(FAST_STATE_EVENT, (data) => {
-		const enabled = (data as { enabled?: unknown } | undefined)?.enabled;
-		if (typeof enabled === "boolean") {
-			fastEnabled = enabled;
-			requestRender();
-		}
-	});
 
 	function scheduleRefresh(ctx: any, delayMs = 0, force = false) {
 		if (disposed) return;
@@ -136,7 +116,7 @@ export default function (pi: ExtensionAPI) {
 					Authorization: `Bearer ${token}`,
 					"ChatGPT-Account-Id": accountId,
 					originator: "pi",
-					"User-Agent": "pi codex-quota-footer",
+					"User-Agent": "pi codex-quota",
 				},
 				signal: ctx.signal,
 			});
@@ -167,67 +147,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
-		fastEnabled = true;
-		const savedFast = ctx.sessionManager
-			.getEntries()
-			.filter((entry: { type: string; customType?: string }) => {
-				return entry.type === "custom" && entry.customType === FAST_STATE_ENTRY_TYPE;
-			})
-			.pop() as { data?: { enabled?: boolean } } | undefined;
-		if (typeof savedFast?.data?.enabled === "boolean") {
-			fastEnabled = savedFast.data.enabled;
-		}
-
 		if (interval) clearInterval(interval);
 		if (refreshTimeout) clearTimeout(refreshTimeout);
 		disposed = false;
-
-		ctx.ui.setFooter((tui, theme, footerData) => {
-			render = () => tui.requestRender();
-			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
-
-			return {
-				dispose() {
-					unsubscribeBranch();
-					render = undefined;
-				},
-				invalidate() {},
-				render(width: number): string[] {
-					const stats = getSessionStats(ctx);
-					const branch = footerData.getGitBranch();
-					const usage = ctx.getContextUsage();
-					const cwd = basename(ctx.cwd) || ctx.cwd;
-
-					const leftParts = [
-						cwd,
-						branch ? ` ${branch}` : undefined,
-						`↑${formatCount(stats.input)}`,
-						`↓${formatCount(stats.output)}`,
-						stats.cost > 0 ? `$${stats.cost.toFixed(3)}` : undefined,
-						usage?.percent != null ? `ctx ${Math.round(usage.percent)}%` : undefined,
-					].filter(Boolean) as string[];
-
-					const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no model";
-					const thinking = pi.getThinkingLevel();
-					const left = theme.fg("dim", leftParts.join("  "));
-					const rightParts = [
-						...(fastEnabled && fastAppliesTo(ctx.model) ? [theme.fg("text", "fast")] : []),
-						theme.fg("accent", model),
-						theme.fg("dim", `thinking ${thinking}`),
-					];
-					const right = rightParts.join(theme.fg("dim", " · "));
-
-					const statuses = Array.from(footerData.getExtensionStatuses().values()).join("  ");
-					const quotaText = colorQuotaText(theme, quota.text);
-
-					return [
-						alignLine(left, right, width),
-						alignLine(theme.fg("dim", statuses), quotaText, width),
-					];
-				},
-			};
-		});
-
+		publish();
 		scheduleRefresh(ctx, 0, true);
 		interval = setInterval(() => scheduleRefresh(ctx, 0, false), REFRESH_MS);
 	});
@@ -248,39 +171,7 @@ export default function (pi: ExtensionAPI) {
 		if (refreshTimeout) clearTimeout(refreshTimeout);
 		interval = undefined;
 		refreshTimeout = undefined;
-		render = undefined;
 	});
-}
-
-function getSessionStats(ctx: any) {
-	let input = 0;
-	let output = 0;
-	let cost = 0;
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		const message = entry.message as AssistantMessage;
-		input += message.usage?.input ?? 0;
-		output += message.usage?.output ?? 0;
-		cost += message.usage?.cost?.total ?? 0;
-	}
-	return { input, output, cost };
-}
-
-function colorQuotaText(theme: any, text: string): string {
-	const percentPattern = /(\d+)%/g;
-	let result = "";
-	let cursor = 0;
-	for (const match of text.matchAll(percentPattern)) {
-		const start = match.index ?? 0;
-		if (start > cursor) result += theme.fg("text", text.slice(cursor, start));
-
-		const percent = Number(match[1]);
-		const color = percent <= 20 ? "error" : percent <= 40 ? "warning" : "text";
-		result += theme.fg(color, match[0]);
-		cursor = start + match[0].length;
-	}
-	if (cursor < text.length) result += theme.fg("text", text.slice(cursor));
-	return result || theme.fg("text", text);
 }
 
 function formatUsage(data: UsageResponse): QuotaState {
@@ -303,7 +194,6 @@ function formatUsage(data: UsageResponse): QuotaState {
 	parts.push(...reviewParts.parts.slice(0, 1));
 	minRemaining = Math.min(minRemaining, reviewParts.minRemaining);
 	if (reviewParts.reached) severity = "error";
-
 
 	const spendReached = (data.spend_control ?? data.spendControl)?.reached;
 	if (spendReached) {
@@ -376,24 +266,6 @@ function formatDuration(seconds: number): string {
 	if (seconds >= 3600) return `${Math.ceil(seconds / 3600)}h`;
 	if (seconds >= 60) return `${Math.ceil(seconds / 60)}m`;
 	return `${Math.ceil(seconds)}s`;
-}
-
-function formatCount(n: number): string {
-	if (n < 1_000) return String(n);
-	if (n < 1_000_000) return `${(n / 1_000).toFixed(1)}k`;
-	return `${(n / 1_000_000).toFixed(1)}m`;
-}
-
-function alignLine(left: string, right: string, width: number): string {
-	if (width <= 0) return "";
-	const rightText = truncateToWidth(right, width, "");
-	const rightWidth = visibleWidth(rightText);
-	if (rightWidth >= width) return rightText;
-
-	const leftMax = Math.max(0, width - rightWidth - 1);
-	const leftText = truncateToWidth(left, leftMax, "");
-	const pad = " ".repeat(Math.max(1, width - visibleWidth(leftText) - rightWidth));
-	return truncateToWidth(`${leftText}${pad}${rightText}`, width, "");
 }
 
 function extractAccountId(token: string): string | undefined {
