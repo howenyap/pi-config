@@ -1,4 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
@@ -68,6 +70,25 @@ type ExaSearchResponse = {
 	costDollars?: unknown;
 };
 
+type ExaResultSummary = {
+	title?: string;
+	url?: string;
+	publishedDate?: string;
+	author?: string | null;
+	score?: number;
+	hasText?: boolean;
+	textLength?: number;
+	highlightCount?: number;
+	hasSummary?: boolean;
+};
+
+type ExaSearchDetails = {
+	resultCount?: number;
+	results?: ExaResultSummary[];
+	searchTime?: number;
+	resolvedSearchType?: string;
+};
+
 function compactObject<T extends Record<string, unknown>>(value: T): Partial<T> {
 	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined && v !== null)) as Partial<T>;
 }
@@ -100,6 +121,33 @@ function formatResult(result: ExaResult, index: number): string {
 function formatResults(results: ExaResult[]): string {
 	const output = results.length > 0 ? results.map(formatResult).join("\n\n---\n\n") : "No Exa results.";
 	return truncate(output, MAX_OUTPUT_CHARS);
+}
+
+function getTextContent(result: { content?: unknown }): string {
+	if (!Array.isArray(result.content)) return "";
+	return result.content
+		.filter((item): item is { type: "text"; text: string } => typeof item === "object" && item !== null && (item as { type?: unknown }).type === "text" && typeof (item as { text?: unknown }).text === "string")
+		.map((item) => item.text)
+		.join("\n");
+}
+
+function formatCollapsedResults(details: ExaSearchDetails | undefined, theme: Theme): string {
+	const count = details?.resultCount ?? details?.results?.length ?? 0;
+	let text = theme.fg("success", `✓ Exa search returned ${count} result${count === 1 ? "" : "s"}`);
+	const meta = [details?.resolvedSearchType, typeof details?.searchTime === "number" ? `${details.searchTime}ms` : undefined].filter(Boolean).join(", ");
+	if (meta) text += theme.fg("dim", ` (${meta})`);
+
+	const summaries = details?.results?.slice(0, 3) ?? [];
+	for (const [index, item] of summaries.entries()) {
+		text += `\n${theme.fg("muted", `${index + 1}.`)} ${theme.fg("toolOutput", item.title ?? "Untitled")}`;
+		if (item.url) text += `\n   ${theme.fg("dim", item.url)}`;
+	}
+
+	if (count > summaries.length) {
+		text += `\n${theme.fg("dim", `… ${count - summaries.length} more result${count - summaries.length === 1 ? "" : "s"}`)}`;
+	}
+	text += `\n${theme.fg("muted", keyHint("app.tools.expand", "to expand"))}`;
+	return text;
 }
 
 function summarizeResult(result: ExaResult) {
@@ -156,6 +204,24 @@ export default function exaSearch(pi: ExtensionAPI) {
 			"Prefer targeted exa_search queries that include the library, framework, API, version, and domain hints when known.",
 		],
 		parameters: exaSearchSchema,
+		renderCall(args, theme) {
+			const query = typeof args.query === "string" ? args.query : "";
+			const count = typeof args.numResults === "number" ? args.numResults : DEFAULT_NUM_RESULTS;
+			return new Text(`${theme.fg("toolTitle", theme.bold("Exa Search"))} ${theme.fg("dim", `(${count})`)} ${theme.fg("toolOutput", query)}`, 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme, context) {
+			const output = getTextContent(result);
+			if (isPartial) {
+				return new Text(theme.fg("warning", "Searching Exa…"), 0, 0);
+			}
+			if (context.isError) {
+				return new Text(output ? theme.fg("error", output) : theme.fg("error", "Exa search failed."), 0, 0);
+			}
+			if (!expanded) {
+				return new Text(formatCollapsedResults(result.details as ExaSearchDetails | undefined, theme), 0, 0);
+			}
+			return new Text(output ? theme.fg("toolOutput", output) : theme.fg("muted", "No Exa output."), 0, 0);
+		},
 		async execute(_toolCallId, params: ExaSearchParams, signal) {
 			const apiKey = await getExaApiKey();
 			if (!apiKey) {
