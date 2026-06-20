@@ -131,22 +131,29 @@ function getTextContent(result: { content?: unknown }): string {
 		.join("\n");
 }
 
-function formatCollapsedResults(details: ExaSearchDetails | undefined, theme: Theme): string {
+function formatCollapsedResults(details: ExaSearchDetails | undefined, params: ExaSearchParams, theme: Theme): string {
 	const count = details?.resultCount ?? details?.results?.length ?? 0;
 	let text = theme.fg("success", `✓ Exa search returned ${count} result${count === 1 ? "" : "s"}`);
 	const meta = [details?.resolvedSearchType, typeof details?.searchTime === "number" ? `${details.searchTime}ms` : undefined].filter(Boolean).join(", ");
 	if (meta) text += theme.fg("dim", ` (${meta})`);
 
-	const summaries = details?.results?.slice(0, 3) ?? [];
-	for (const [index, item] of summaries.entries()) {
-		text += `\n${theme.fg("muted", `${index + 1}.`)} ${theme.fg("toolOutput", item.title ?? "Untitled")}`;
-		if (item.url) text += `\n   ${theme.fg("dim", item.url)}`;
-	}
+	text += `\n${theme.fg("muted", "query:")} ${theme.fg("toolOutput", params.query ?? "")}`;
 
-	if (count > summaries.length) {
-		text += `\n${theme.fg("dim", `… ${count - summaries.length} more result${count - summaries.length === 1 ? "" : "s"}`)}`;
-	}
-	text += `\n${theme.fg("muted", keyHint("app.tools.expand", "to expand"))}`;
+	const paramSummary = [
+		`numResults=${params.numResults ?? DEFAULT_NUM_RESULTS}`,
+		`type=${params.type ?? "auto"}`,
+		`text=${params.text ?? true}`,
+		params.text !== false ? `textMaxCharacters=${params.textMaxCharacters ?? DEFAULT_TEXT_MAX_CHARACTERS}` : undefined,
+		`highlights=${params.highlights ?? true}`,
+		`summary=${params.summary ?? false}`,
+		params.includeDomains?.length ? `includeDomains=${params.includeDomains.join(",")}` : undefined,
+		params.excludeDomains?.length ? `excludeDomains=${params.excludeDomains.join(",")}` : undefined,
+		params.startPublishedDate ? `start=${params.startPublishedDate}` : undefined,
+		params.endPublishedDate ? `end=${params.endPublishedDate}` : undefined,
+	].filter(Boolean);
+
+	text += `\n${theme.fg("muted", "params:")} ${theme.fg("dim", paramSummary.join(" · "))}`;
+	text += `\n${theme.fg("muted", keyHint("app.tools.expand", "to expand results"))}`;
 	return text;
 }
 
@@ -218,7 +225,7 @@ export default function exaSearch(pi: ExtensionAPI) {
 				return new Text(output ? theme.fg("error", output) : theme.fg("error", "Exa search failed."), 0, 0);
 			}
 			if (!expanded) {
-				return new Text(formatCollapsedResults(result.details as ExaSearchDetails | undefined, theme), 0, 0);
+				return new Text(formatCollapsedResults(result.details as ExaSearchDetails | undefined, context.args as ExaSearchParams, theme), 0, 0);
 			}
 			return new Text(output ? theme.fg("toolOutput", output) : theme.fg("muted", "No Exa output."), 0, 0);
 		},
