@@ -500,7 +500,15 @@ export default function questionsExtension(pi: ExtensionAPI) {
 		],
 		parameters: questionParameters(false),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			return askQuestion(params, ctx, "ask_question");
+			const result = await askQuestion(params, ctx, "ask_question");
+			if (result.isError) {
+				const text = result.content
+					?.map((item: any) => (item?.type === "text" ? item.text : undefined))
+					.filter(Boolean)
+					.join("\n") || "Question failed.";
+				throw new Error(text);
+			}
+			return result;
 		},
 	});
 
