@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Explorer"
+  short_description: "Explore external repositories in a cache"
+  default_prompt: "Use $repo-explorer to inspect an external repository without cluttering my workspace."
