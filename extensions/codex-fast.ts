@@ -28,23 +28,32 @@ function publish(pi: ExtensionAPI) {
 	pi.events.emit(STATE_EVENT, { enabled: fastEnabled });
 }
 
+function restoreFromBranch(ctx: any) {
+	fastEnabled = true;
+	const saved = ctx.sessionManager
+		.getBranch()
+		.filter((entry: { type: string; customType?: string }) => {
+			return entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE;
+		})
+		.pop() as { data?: { enabled?: boolean } } | undefined;
+
+	if (typeof saved?.data?.enabled === "boolean") {
+		fastEnabled = saved.data.enabled;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
-		fastEnabled = true;
-		const saved = ctx.sessionManager
-			.getEntries()
-			.filter((entry: { type: string; customType?: string }) => {
-				return entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE;
-			})
-			.pop() as { data?: { enabled?: boolean } } | undefined;
-
-		if (typeof saved?.data?.enabled === "boolean") {
-			fastEnabled = saved.data.enabled;
-		}
+		restoreFromBranch(ctx);
 
 		// Clear any status/footer artifacts from older versions. The status bar
 		// owns footer rendering and listens for STATE_EVENT to show "fast" inline.
 		ctx.ui.setStatus("codex-fast", undefined);
+		publish(pi);
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		restoreFromBranch(ctx);
 		publish(pi);
 	});
 

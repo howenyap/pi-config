@@ -52,7 +52,7 @@ export default function statusBarExtension(pi: ExtensionAPI) {
 
 		fastEnabled = true;
 		const savedFast = ctx.sessionManager
-			.getEntries()
+			.getBranch()
 			.filter((entry: { type: string; customType?: string }) => {
 				return entry.type === "custom" && entry.customType === FAST_STATE_ENTRY_TYPE;
 			})
