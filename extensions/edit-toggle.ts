@@ -50,8 +50,10 @@ export default function editToggleExtension(pi: ExtensionAPI) {
 
 	function enableEdits(ctx?: ExtensionContext, shouldPersist = true) {
 		editsEnabled = true;
-		const restore = previousActiveTools?.length ? previousActiveTools : pi.getAllTools().map((tool) => tool.name);
-		pi.setActiveTools(validTools(restore));
+		const current = pi.getActiveTools();
+		const restoreMutating = (previousActiveTools ?? [])
+			.filter((name) => MUTATING_TOOLS.has(name));
+		pi.setActiveTools(validTools([...current, ...restoreMutating]));
 		updateStatus(ctx);
 		if (shouldPersist) persist();
 	}
@@ -71,8 +73,9 @@ export default function editToggleExtension(pi: ExtensionAPI) {
 			else disableEdits(ctx, false);
 		} else {
 			// Default to safe/read-only mode for new sessions or sessions without saved state.
-			// Remember the full tool set so `/edits on` can restore mutating tools.
-			previousActiveTools = pi.getAllTools().map((tool) => tool.name);
+			// Remember only the current active set so `/edits on` does not resurrect
+			// tools that another extension intentionally disabled.
+			previousActiveTools = pi.getActiveTools();
 			editsEnabled = false;
 			pi.setActiveTools(safeTools(previousActiveTools));
 			updateStatus(ctx);
