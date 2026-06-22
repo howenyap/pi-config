@@ -38,14 +38,7 @@ type UsageResponse = {
 	codeReviewRateLimit?: UsageLimit;
 	additional_rate_limits?: unknown;
 	additionalRateLimits?: unknown;
-	credits?: {
-		has_credits?: boolean;
-		hasCredits?: boolean;
-		unlimited?: boolean;
-		balance?: string | number;
-		approx_local_messages?: [number, number];
-		approxLocalMessages?: [number, number];
-	};
+	credits?: unknown;
 	spend_control?: { reached?: boolean };
 	spendControl?: { reached?: boolean };
 };
@@ -192,8 +185,7 @@ function formatUsage(data: UsageResponse): QuotaState {
 	const review = data.code_review_rate_limit ?? data.codeReviewRateLimit;
 	const reviewParts = formatLimitWindows(review, "review ");
 	parts.push(...reviewParts.parts.slice(0, 1));
-	minRemaining = Math.min(minRemaining, reviewParts.minRemaining);
-	if (reviewParts.reached) severity = "error";
+	if (reviewParts.reached) parts.push("review limit reached");
 
 	const spendReached = (data.spend_control ?? data.spendControl)?.reached;
 	if (spendReached) {
@@ -223,11 +215,12 @@ function formatLimitWindows(limit: UsageLimit | undefined, prefix: string) {
 		if (!win) continue;
 		const usedPercent = getPercent(win);
 		const remainingPercent = usedPercent == null ? undefined : Math.max(0, Math.min(100, 100 - usedPercent));
-		if (remainingPercent != null) minRemaining = Math.min(minRemaining, remainingPercent);
+		const displayRemaining = remainingPercent === 0 && !reached && limit?.allowed === true ? 1 : remainingPercent;
+		if (displayRemaining != null) minRemaining = Math.min(minRemaining, displayRemaining);
 		const label = formatWindowLabel(win);
 		const reset = getResetSeconds(win);
-		const pctText = remainingPercent == null ? "?%" : `${Math.round(remainingPercent)}%`;
-		parts.push(`${prefix}${label} ${pctText}${reset == null ? "" : ` reset ${formatDuration(reset)}`}`);
+		const pctText = displayRemaining == null ? "?%" : displayRemaining === 1 && remainingPercent === 0 ? "<1%" : `${Math.round(displayRemaining)}%`;
+		parts.push(`${prefix}${label} left ${pctText}${reset == null ? "" : ` reset ${formatDuration(reset)}`}`);
 	}
 
 	return { parts, minRemaining, reached };
