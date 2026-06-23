@@ -145,6 +145,7 @@ export default function questionsExtension(pi: ExtensionAPI) {
 				);
 
 				if (result.isError && result.details?.cancelled) return result;
+				if (result.isError && result.details?.isCorrect !== false) return result;
 				if (result.details?.isCorrect === false) anyIncorrect = true;
 				results.push(result.details);
 			}
@@ -215,13 +216,14 @@ export default function questionsExtension(pi: ExtensionAPI) {
 					]
 				: [];
 
-		const selected = await ctx.ui.custom<QuestionResult | null>((tui: any, theme: any, keybindings: any, done: any) => {
-			let cursor = 0;
-			let input = "";
-			let inputCursor = 0;
-			let inputRequired = false;
-			let cancelArmedAt = 0;
-			const cancelDebounceMs = 2000;
+			const selected = await ctx.ui.custom<QuestionResult | null>((tui: any, theme: any, keybindings: any, done: any) => {
+				let cursor = 0;
+				let input = "";
+				let inputCursor = 0;
+				let inputRequired = false;
+				let cancelArmedAt = 0;
+				let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+				const cancelDebounceMs = 2000;
 
 			function move(delta: number) {
 				cursor = Math.max(0, Math.min(items.length - 1, cursor + delta));
@@ -232,27 +234,44 @@ export default function questionsExtension(pi: ExtensionAPI) {
 				return items[cursor] ?? null;
 			}
 
-			function showInput() {
-				return mode === "subjective" || currentItem()?.isOther;
-			}
+				function showInput() {
+					return mode === "subjective" || currentItem()?.isOther;
+				}
 
-			function submit() {
-				if (mode === "subjective") {
-					const answer = input.trim();
-					if (requireAnswer && !answer) {
-						inputRequired = true;
+				function clearCancelArmed() {
+					cancelArmedAt = 0;
+					if (cancelTimer) clearTimeout(cancelTimer);
+					cancelTimer = undefined;
+				}
+
+				function armCancel() {
+					clearCancelArmed();
+					cancelArmedAt = Date.now();
+					cancelTimer = setTimeout(() => {
+						cancelArmedAt = 0;
+						cancelTimer = undefined;
 						tui.requestRender();
+					}, cancelDebounceMs);
+				}
+
+				function submit() {
+					clearCancelArmed();
+					if (mode === "subjective") {
+						const answer = input.trim();
+						if (requireAnswer && !answer) {
+							inputRequired = true;
+							tui.requestRender();
+							return;
+						}
+						done({ answer, source: "subjective" });
 						return;
 					}
-					done({ answer, source: "subjective" });
-					return;
-				}
 
-				const item = currentItem();
-				if (!item) {
-					done(null);
-					return;
-				}
+					const item = currentItem();
+					if (!item) {
+						done(null);
+						return;
+					}
 
 				if (item.isOther) {
 					const answer = input.trim();
@@ -360,20 +379,21 @@ export default function questionsExtension(pi: ExtensionAPI) {
 				return false;
 			}
 
-			return {
-				handleInput(data: string) {
-					if (keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
-						const now = Date.now();
-						if (cancelArmedAt > 0 && now - cancelArmedAt <= cancelDebounceMs) {
-							done(null);
+				return {
+					handleInput(data: string) {
+						if (keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
+							const now = Date.now();
+							if (cancelArmedAt > 0 && now - cancelArmedAt <= cancelDebounceMs) {
+								if (cancelTimer) clearTimeout(cancelTimer);
+								done(null);
+								return;
+							}
+							armCancel();
+							tui.requestRender();
 							return;
 						}
-						cancelArmedAt = now;
-						tui.requestRender();
-						return;
-					}
 
-					cancelArmedAt = 0;
+						clearCancelArmed();
 
 					if (keybindings.matches(data, "tui.select.confirm") || keybindings.matches(data, "tui.input.submit")) {
 						submit();
@@ -455,9 +475,12 @@ export default function questionsExtension(pi: ExtensionAPI) {
 					return lines;
 				},
 
-				invalidate() {},
-			};
-		});
+					invalidate() {},
+					dispose() {
+						if (cancelTimer) clearTimeout(cancelTimer);
+					},
+				};
+			});
 
 		if (!selected) {
 			return {

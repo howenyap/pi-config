@@ -3,11 +3,15 @@ import { matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
 type Mode = "insert" | "normal";
 type PendingOperator = "d" | "g" | "y" | "r";
+type TextRange = { start: number; end: number; count: number };
 
 interface YankBuffer {
 	text: string;
 	linewise: boolean;
 }
+
+const MAX_COUNT = 99;
+const MAX_COUNT_DIGITS = 2;
 
 function clamp(value: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, value));
@@ -21,6 +25,26 @@ function charKind(char: string): "space" | "word" | "punct" {
 	if (/\s/.test(char)) return "space";
 	if (/[\p{L}\p{N}_]/u.test(char)) return "word";
 	return "punct";
+}
+
+function graphemeSpans(text: string): Array<{ start: number; end: number }> {
+	const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+	return Array.from(segmenter.segment(text), (segment) => ({
+		start: segment.index,
+		end: segment.index + segment.segment.length,
+	}));
+}
+
+function graphemeRange(text: string, col: number, count: number): TextRange | undefined {
+	const spans = graphemeSpans(text);
+	const startIndex = spans.findIndex((span) => col < span.end);
+	if (startIndex < 0) return undefined;
+	const endIndex = Math.min(spans.length, startIndex + count);
+	return {
+		start: spans[startIndex]!.start,
+		end: endIndex < spans.length ? spans[endIndex]!.start : text.length,
+		count: endIndex - startIndex,
+	};
 }
 
 class VimInputEditor extends CustomEditor {
@@ -77,9 +101,21 @@ class VimInputEditor extends CustomEditor {
 	}
 
 	private handleNormalInput(data: string): void {
-		// Let app-level and editor-level controls through.
 		if (!isPrintable(data)) {
-			super.handleInput(data);
+			if (matchesKey(data, "ctrl+c")) {
+				super.handleInput(data);
+			} else if (matchesKey(data, "left")) {
+				this.moveLeft(this.takeCount());
+			} else if (matchesKey(data, "right")) {
+				this.moveRight(this.takeCount());
+			} else if (matchesKey(data, "up")) {
+				this.repeatKey("\x1b[A", this.takeCount());
+			} else if (matchesKey(data, "down")) {
+				this.repeatKey("\x1b[B", this.takeCount());
+			} else if (this.pending || this.countBuffer) {
+				this.clearPending();
+				this.requestRender();
+			}
 			return;
 		}
 
@@ -89,6 +125,7 @@ class VimInputEditor extends CustomEditor {
 		}
 
 		if (/^[1-9]$/.test(data) || (this.countBuffer && data === "0")) {
+			if (this.countBuffer.length >= MAX_COUNT_DIGITS) return;
 			this.countBuffer += data;
 			this.requestRender();
 			return;
@@ -235,7 +272,7 @@ class VimInputEditor extends CustomEditor {
 	private takeCount(): number {
 		const count = this.countBuffer ? Number.parseInt(this.countBuffer, 10) : 1;
 		this.countBuffer = "";
-		return Number.isFinite(count) && count > 0 ? count : 1;
+		return Number.isFinite(count) && count > 0 ? Math.min(count, MAX_COUNT) : 1;
 	}
 
 	private requestRender(): void {
@@ -325,22 +362,23 @@ class VimInputEditor extends CustomEditor {
 		const lines = this.getLines();
 		const { line, col } = this.getCursor();
 		const text = lines[line] ?? "";
-		if (col >= text.length) return;
-		this.yankBuffer = { text: text.slice(col, col + count), linewise: false };
-		this.repeatKey("\x1b[3~", count);
+		const range = graphemeRange(text, col, count);
+		if (!range) return;
+		this.yankBuffer = { text: text.slice(range.start, range.end), linewise: false };
+		this.repeatKey("\x1b[3~", range.count);
 	}
 
 	private replaceChars(count: number, replacement: string): void {
 		const lines = this.getLines();
 		const { line, col } = this.getCursor();
 		const text = lines[line] ?? "";
-		if (col >= text.length) return;
+		const range = graphemeRange(text, col, count);
+		if (!range) return;
 
-		const deleteCount = Math.min(count, text.length - col);
-		const nextLine = text.slice(0, col) + replacement.repeat(deleteCount) + text.slice(col + deleteCount);
+		const nextLine = text.slice(0, range.start) + replacement.repeat(range.count) + text.slice(range.end);
 		const nextLines = [...lines];
 		nextLines[line] = nextLine;
-		this.replaceState(nextLines, line, col);
+		this.replaceState(nextLines, line, range.start);
 	}
 
 	private deleteWordsForward(count: number): void {
