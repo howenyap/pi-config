@@ -60,10 +60,18 @@ function getTextParts(content: unknown): string[] {
 	return content.filter(isTextContentBlock).map((part) => part.text);
 }
 
+function stripTerminalControls(text: string): string {
+	return text
+		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, "")
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/\x1b[ -/]*[@-~]/g, "")
+		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
+}
+
 function getMessageText(entry: SessionMessageEntry): string {
 	const message = entry.message as { role?: string; content?: unknown };
-	const text = getTextParts(message.content)
-		.join("\n")
+	const text = stripTerminalControls(getTextParts(message.content).join("\n"))
 		.replace(/\s+/g, " ")
 		.trim();
 

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { isReadToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -16,8 +16,8 @@ function expandHome(path: string): string {
 	return path;
 }
 
-function shellExecutionDisabled(): boolean {
-	for (const settingsPath of [join(homedir(), ".pi/agent/settings.json"), join(process.cwd(), ".pi/settings.json")]) {
+function shellExecutionDisabled(cwd: string): boolean {
+	for (const settingsPath of [join(homedir(), ".pi/agent/settings.json"), join(cwd, ".pi/settings.json")]) {
 		try {
 			if (!existsSync(settingsPath)) continue;
 			const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
@@ -27,6 +27,19 @@ function shellExecutionDisabled(): boolean {
 		}
 	}
 	return false;
+}
+
+function shellEnv(): NodeJS.ProcessEnv {
+	return {
+		HOME: process.env.HOME,
+		LANG: process.env.LANG,
+		LC_ALL: process.env.LC_ALL,
+		LOGNAME: process.env.LOGNAME,
+		PATH: process.env.PATH,
+		SHELL: process.env.SHELL,
+		TMPDIR: process.env.TMPDIR,
+		USER: process.env.USER,
+	};
 }
 
 function truncateOutput(text: string): string {
@@ -42,7 +55,7 @@ async function runShell(command: string, cwd: string, disabled: boolean): Promis
 			cwd,
 			timeout: DEFAULT_TIMEOUT_MS,
 			maxBuffer: DEFAULT_MAX_BUFFER,
-			env: process.env,
+			env: shellEnv(),
 		});
 		return truncateOutput([stdout, stderr].filter(Boolean).join(""));
 	} catch (error) {
@@ -53,8 +66,8 @@ async function runShell(command: string, cwd: string, disabled: boolean): Promis
 	}
 }
 
-async function renderDynamicContext(markdown: string, skillDir: string): Promise<{ text: string; count: number }> {
-	const disabled = shellExecutionDisabled();
+async function renderDynamicContext(markdown: string, skillDir: string, sessionCwd: string): Promise<{ text: string; count: number }> {
+	const disabled = shellExecutionDisabled(sessionCwd);
 	let count = 0;
 
 	// Fenced multi-line command blocks:
@@ -142,6 +155,24 @@ function standardSkillRoots(): string[] {
 	return [...new Set(roots)];
 }
 
+function realPathOrResolved(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+function isWithin(root: string, path: string): boolean {
+	const rel = relative(root, path);
+	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function isTrustedSkillPath(path: string): boolean {
+	const realPath = realPathOrResolved(path);
+	return standardSkillRoots().some((root) => existsSync(root) && isWithin(realPathOrResolved(root), realPath));
+}
+
 function findSkillByName(name: string): string | undefined {
 	for (const root of standardSkillRoots()) {
 		if (!existsSync(root)) continue;
@@ -173,7 +204,7 @@ export default function skillDynamicContext(pi: ExtensionAPI) {
 		if (!skillFile) return { action: "continue" };
 
 		const raw = readFileSync(skillFile, "utf8");
-		const { text, count } = await renderDynamicContext(raw, dirname(skillFile));
+		const { text, count } = await renderDynamicContext(raw, dirname(skillFile), ctx.cwd);
 		if (count > 0) ctx.ui.notify(`Rendered ${count} dynamic skill context command${count === 1 ? "" : "s"} for ${match[1]}`, "info");
 		const args = match[2]?.trim();
 		return { action: "transform", text: args ? `${text}\n\nUser: ${args}` : text };
@@ -186,7 +217,9 @@ export default function skillDynamicContext(pi: ExtensionAPI) {
 		if (!firstText) return;
 
 		const skillPath = resolve(ctx.cwd, event.input.path);
-		const { text, count } = await renderDynamicContext(firstText.text, dirname(skillPath));
+		if (!isTrustedSkillPath(skillPath)) return;
+
+		const { text, count } = await renderDynamicContext(firstText.text, dirname(skillPath), ctx.cwd);
 		if (count === 0) return;
 		ctx.ui.notify(`Rendered ${count} dynamic skill context command${count === 1 ? "" : "s"} in ${event.input.path}`, "info");
 		return {

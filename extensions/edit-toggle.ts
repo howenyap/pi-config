@@ -7,7 +7,22 @@ interface EditToggleState {
 
 const STATE_ENTRY = "edit-toggle-state";
 const STATUS_KEY = "edit-toggle";
-const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
+const MUTATING_TOOL_NAMES = new Set([
+	"apply_patch",
+	"bash",
+	"command",
+	"edit",
+	"exec",
+	"exec_command",
+	"run_command",
+	"shell",
+	"terminal",
+	"write",
+]);
+const MUTATING_TOOL_PATTERNS = [
+	/(^|[_-])(delete|edit|insert|patch|remove|rename|replace|reset|shell|write)([_-]|$)/,
+	/(^|[_-])(commit|push|deploy|send)([_-]|$)/,
+];
 
 export default function editToggleExtension(pi: ExtensionAPI) {
 	let editsEnabled = true;
@@ -23,7 +38,12 @@ export default function editToggleExtension(pi: ExtensionAPI) {
 	}
 
 	function safeTools(names: string[]): string[] {
-		return validTools(names).filter((name) => !MUTATING_TOOLS.has(name));
+		return validTools(names).filter((name) => !isMutatingToolName(name));
+	}
+
+	function isMutatingToolName(name: string): boolean {
+		const normalized = name.toLowerCase();
+		return MUTATING_TOOL_NAMES.has(normalized) || MUTATING_TOOL_PATTERNS.some((pattern) => pattern.test(normalized));
 	}
 
 	function persist() {
@@ -52,7 +72,7 @@ export default function editToggleExtension(pi: ExtensionAPI) {
 		editsEnabled = true;
 		const current = pi.getActiveTools();
 		const restoreMutating = (previousActiveTools ?? [])
-			.filter((name) => MUTATING_TOOLS.has(name));
+			.filter((name) => isMutatingToolName(name));
 		pi.setActiveTools(validTools([...current, ...restoreMutating]));
 		updateStatus(ctx);
 		if (shouldPersist) persist();
@@ -104,6 +124,11 @@ export default function editToggleExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (mode && mode !== "toggle") {
+				ctx.ui.notify("Usage: /edits, /edits on, /edits off, or /edits status", "warning");
+				return;
+			}
+
 			if (editsEnabled) {
 				disableEdits(ctx);
 				ctx.ui.notify("Edits disabled. Mutating tools are unavailable until /edits on.", "warning");
@@ -125,7 +150,7 @@ export default function editToggleExtension(pi: ExtensionAPI) {
 
 	pi.on("tool_call", (event) => {
 		if (editsEnabled) return;
-		if (MUTATING_TOOLS.has(event.toolName)) {
+		if (isMutatingToolName(event.toolName)) {
 			return { block: true, reason: "Edits are disabled. Run /edits on to re-enable mutating tools." };
 		}
 	});
