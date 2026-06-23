@@ -126,6 +126,7 @@ export default function codexQuotaExtension(pi: ExtensionAPI) {
 			const data = (await response.json()) as UsageResponse;
 			setQuota(formatUsage(data));
 		} catch (error) {
+			if (disposed || (error instanceof Error && error.name === "AbortError")) return;
 			const message = error instanceof Error ? error.message : String(error);
 			setQuota({
 				text: `Codex quota: ${message}`,
@@ -143,7 +144,7 @@ export default function codexQuotaExtension(pi: ExtensionAPI) {
 		if (interval) clearInterval(interval);
 		if (refreshTimeout) clearTimeout(refreshTimeout);
 		disposed = false;
-		publish();
+		setQuota({ text: "Codex quota: loading…", severity: "dim" });
 		scheduleRefresh(ctx, 0, true);
 		interval = setInterval(() => scheduleRefresh(ctx, 0, false), REFRESH_MS);
 	});
@@ -180,12 +181,19 @@ function formatUsage(data: UsageResponse): QuotaState {
 	const mainParts = formatLimitWindows(main, "");
 	parts.push(...mainParts.parts);
 	minRemaining = Math.min(minRemaining, mainParts.minRemaining);
-	if (mainParts.reached) severity = "error";
+	if (mainParts.reached) {
+		parts.push("limit reached");
+		severity = "error";
+	}
 
 	const review = data.code_review_rate_limit ?? data.codeReviewRateLimit;
 	const reviewParts = formatLimitWindows(review, "review ");
 	parts.push(...reviewParts.parts.slice(0, 1));
-	if (reviewParts.reached) parts.push("review limit reached");
+	minRemaining = Math.min(minRemaining, reviewParts.minRemaining);
+	if (reviewParts.reached) {
+		parts.push("review limit reached");
+		severity = "error";
+	}
 
 	const spendReached = (data.spend_control ?? data.spendControl)?.reached;
 	if (spendReached) {

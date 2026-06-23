@@ -14,9 +14,8 @@ const DEFAULT_TEXT_MAX_CHARACTERS = 3_000;
 const MAX_TEXT_MAX_CHARACTERS = 20_000;
 const MAX_SUMMARY_CHARS = 900;
 const MAX_HIGHLIGHT_CHARS = 500;
-const MAX_RESULT_TEXT_CHARS = 1_800;
 const MAX_OUTPUT_CHARS = 45_000;
-const EXA_SEARCH_TYPES = ["auto", "neural", "keyword", "instant", "deep-reasoning"] as const;
+const EXA_SEARCH_TYPES = ["auto", "neural", "fast", "deep", "deep-reasoning", "instant"] as const;
 
 const exaSearchSchema = Type.Object({
 	query: Type.String({ minLength: 1, description: "Search query. Be specific and include relevant product/library/version terms when useful." }),
@@ -103,7 +102,7 @@ function truncate(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n[truncated after ${maxChars} chars]`;
 }
 
-function formatResult(result: ExaResult, index: number): string {
+function formatResult(result: ExaResult, index: number, textMaxCharacters: number): string {
 	const highlights = Array.isArray(result.highlights) ? result.highlights : result.highlight ? [result.highlight] : [];
 	const parts = [
 		`${index + 1}. ${result.title ?? "Untitled"}`,
@@ -113,13 +112,13 @@ function formatResult(result: ExaResult, index: number): string {
 		typeof result.score === "number" ? `Score: ${result.score}` : undefined,
 		result.summary ? `Summary: ${truncate(result.summary, MAX_SUMMARY_CHARS)}` : undefined,
 		highlights.length > 0 ? `Highlights:\n${highlights.map((h) => `- ${truncate(String(h), MAX_HIGHLIGHT_CHARS)}`).join("\n")}` : undefined,
-		result.text ? `Text:\n${truncate(result.text, MAX_RESULT_TEXT_CHARS)}` : undefined,
+		result.text ? `Text:\n${truncate(result.text, textMaxCharacters)}` : undefined,
 	];
 	return parts.filter(Boolean).join("\n");
 }
 
-function formatResults(results: ExaResult[]): string {
-	const output = results.length > 0 ? results.map(formatResult).join("\n\n---\n\n") : "No Exa results.";
+function formatResults(results: ExaResult[], textMaxCharacters: number): string {
+	const output = results.length > 0 ? results.map((result, index) => formatResult(result, index, textMaxCharacters)).join("\n\n---\n\n") : "No Exa results.";
 	return truncate(output, MAX_OUTPUT_CHARS);
 }
 
@@ -180,14 +179,16 @@ function parseJson(text: string): unknown {
 	}
 }
 
-async function getExaApiKey(): Promise<string | undefined> {
+async function getExaApiKey(signal?: AbortSignal): Promise<string | undefined> {
 	if (process.env.EXA_API_KEY?.trim()) return process.env.EXA_API_KEY.trim();
+	if (signal?.aborted) throw new Error("Exa API key lookup cancelled.");
 
 	if (process.platform === "darwin") {
 		try {
 			const { stdout } = await execFileAsync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], {
 				timeout: 10_000,
 				maxBuffer: 10_000,
+				signal,
 			});
 			const key = stdout.trim();
 			if (key) return key;
@@ -230,7 +231,7 @@ export default function exaSearch(pi: ExtensionAPI) {
 			return new Text(output ? theme.fg("toolOutput", output) : theme.fg("muted", "No Exa output."), 0, 0);
 		},
 		async execute(_toolCallId, params: ExaSearchParams, signal) {
-			const apiKey = await getExaApiKey();
+			const apiKey = await getExaApiKey(signal);
 			if (!apiKey) {
 				throw new Error(`Missing Exa API key. On macOS, store it in Keychain with service '${KEYCHAIN_SERVICE}'. Fallback env var EXA_API_KEY is also supported.`);
 			}
@@ -279,7 +280,7 @@ export default function exaSearch(pi: ExtensionAPI) {
 
 			const results: ExaResult[] = Array.isArray(data.results) ? data.results : [];
 			return {
-				content: [{ type: "text" as const, text: formatResults(results) }],
+				content: [{ type: "text" as const, text: formatResults(results, textMaxCharacters) }],
 				details: compactObject({
 					request: body,
 					requestId: data.requestId,

@@ -9,6 +9,7 @@ const STATE_EVENT = "codex-search:state";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const MAX_OUTPUT_CHARS = 60_000;
+const MAX_RAW_RESPONSE_CHARS = 80_000;
 const MAX_ERROR_CHARS = 4_000;
 
 const SEARCH_EXTENSION_MODES = ["off", "standalone", "hosted", "both"] as const;
@@ -74,11 +75,13 @@ type SearchResponse = {
 
 type AgentToolContent = { type: "text"; text: string };
 
-let state: CodexSearchState = {
+const DEFAULT_STATE: CodexSearchState = {
 	mode: "hosted",
 	access: "live",
 	contextSize: "medium",
 };
+let fallbackState: CodexSearchState = { ...DEFAULT_STATE };
+const statesBySession = new Map<string, CodexSearchState>();
 
 const searchQuerySchema = Type.Object({
 	q: Type.String({ minLength: 1, description: "Search query." }),
@@ -141,6 +144,30 @@ function truncate(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n[truncated after ${maxChars} chars]`;
 }
 
+async function readResponseText(response: Response, maxChars: number): Promise<string> {
+	if (!response.body) return truncate(await response.text(), maxChars);
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			text += decoder.decode(value, { stream: true });
+			if (text.length > maxChars) {
+				await reader.cancel();
+				return `${text.slice(0, maxChars)}\n[response truncated after ${maxChars} chars]`;
+			}
+		}
+		text += decoder.decode();
+		return text;
+	} finally {
+		reader.releaseLock();
+	}
+}
+
 function decodeJwtPayload(token: string): Record<string, any> {
 	const parts = token.split(".");
 	if (parts.length !== 3) throw new Error("Invalid OpenAI Codex token shape");
@@ -172,7 +199,9 @@ function resolveCodexApiBaseUrl(baseUrl: string | undefined): string {
 }
 
 function resolveSearchUrl(baseUrl: string | undefined): string {
-	const normalized = resolveCodexApiBaseUrl(baseUrl);
+	const raw = (baseUrl?.trim() || DEFAULT_CODEX_BASE_URL).replace(/\/+$/, "");
+	if (raw.endsWith("/codex/alpha/search") || raw.endsWith("/alpha/search")) return raw;
+	const normalized = resolveCodexApiBaseUrl(raw);
 	if (normalized.endsWith("/alpha/search")) return normalized;
 	return `${normalized}/alpha/search`;
 }
@@ -183,13 +212,13 @@ function externalWebAccess(access: WebSearchAccessMode): boolean | "indexed" {
 	return true;
 }
 
-function hostedWebSearchTool() {
+function hostedWebSearchTool(currentState: CodexSearchState) {
 	return compactObject({
 		type: "web_search",
-		external_web_access: state.access === "cached" ? false : true,
-		index_gated_web_access: state.access === "indexed" ? true : undefined,
-		filters: state.allowedDomains?.length ? { allowed_domains: state.allowedDomains } : undefined,
-		search_context_size: state.contextSize,
+		external_web_access: currentState.access === "cached" ? false : true,
+		index_gated_web_access: currentState.access === "indexed" ? true : undefined,
+		filters: currentState.allowedDomains?.length ? { allowed_domains: currentState.allowedDomains } : undefined,
+		search_context_size: currentState.contextSize,
 	});
 }
 
@@ -222,17 +251,33 @@ function summarizeCommand(params: WebRunParams): string {
 	return pieces.join(" · ") || "web.run";
 }
 
-function publish(pi: ExtensionAPI) {
-	pi.events.emit(STATE_EVENT, { ...state });
+function sessionId(ctx: any): string | undefined {
+	const getSessionId = ctx?.sessionManager?.getSessionId;
+	return typeof getSessionId === "function" ? getSessionId.call(ctx.sessionManager) : undefined;
 }
 
-function persist(pi: ExtensionAPI) {
-	pi.appendEntry(STATE_ENTRY_TYPE, { ...state });
+function getState(ctx: any): CodexSearchState {
+	const id = sessionId(ctx);
+	return id ? statesBySession.get(id) ?? fallbackState : fallbackState;
 }
 
-function syncActiveTools(pi: ExtensionAPI) {
+function setState(ctx: any, next: CodexSearchState) {
+	const id = sessionId(ctx);
+	if (id) statesBySession.set(id, next);
+	else fallbackState = next;
+}
+
+function publish(pi: ExtensionAPI, currentState: CodexSearchState) {
+	pi.events.emit(STATE_EVENT, { ...currentState });
+}
+
+function persist(pi: ExtensionAPI, currentState: CodexSearchState) {
+	pi.appendEntry(STATE_ENTRY_TYPE, { ...currentState });
+}
+
+function syncActiveTools(pi: ExtensionAPI, currentState: CodexSearchState) {
 	const active = new Set(pi.getActiveTools());
-	const shouldEnableWebRun = state.mode === "standalone" || state.mode === "both";
+	const shouldEnableWebRun = currentState.mode === "standalone" || currentState.mode === "both";
 	if (shouldEnableWebRun) active.add("web_run");
 	else active.delete("web_run");
 	pi.setActiveTools([...active]);
@@ -250,9 +295,9 @@ function parseContextSize(value: string): SearchContextSize | undefined {
 	return SEARCH_CONTEXT_SIZES.find((size) => size === value);
 }
 
-function formatState(): string {
-	const domains = state.allowedDomains?.length ? `, domains=${state.allowedDomains.join(",")}` : "";
-	return `mode=${state.mode}, access=${state.access}, context=${state.contextSize ?? "default"}${domains}`;
+function formatState(currentState: CodexSearchState): string {
+	const domains = currentState.allowedDomains?.length ? `, domains=${currentState.allowedDomains.join(",")}` : "";
+	return `mode=${currentState.mode}, access=${currentState.access}, context=${currentState.contextSize ?? "default"}${domains}`;
 }
 
 function formatCollapsedResult(result: { details?: any }, params: WebRunParams, theme: Theme): string {
@@ -273,34 +318,36 @@ function textContent(result: { content?: unknown }): string {
 		.join("\n");
 }
 
-function restoreFromBranch(ctx: any) {
-	state = { mode: "hosted", access: "live", contextSize: "medium" };
+function restoreFromBranch(ctx: any): CodexSearchState {
+	let nextState: CodexSearchState = { ...DEFAULT_STATE };
 	const saved = ctx.sessionManager
 		.getBranch()
 		.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE)
 		.pop() as { data?: Partial<CodexSearchState> } | undefined;
 
 	if (saved?.data) {
-		state = {
-			mode: parseMode(String(saved.data.mode)) ?? state.mode,
-			access: parseAccess(String(saved.data.access)) ?? state.access,
-			contextSize: parseContextSize(String(saved.data.contextSize)) ?? state.contextSize,
+		nextState = {
+			mode: parseMode(String(saved.data.mode)) ?? nextState.mode,
+			access: parseAccess(String(saved.data.access)) ?? nextState.access,
+			contextSize: parseContextSize(String(saved.data.contextSize)) ?? nextState.contextSize,
 			allowedDomains: Array.isArray(saved.data.allowedDomains) ? saved.data.allowedDomains.filter((d): d is string => typeof d === "string" && d.trim().length > 0) : undefined,
 		};
 	}
+	setState(ctx, nextState);
+	return nextState;
 }
 
 export default function codexSearch(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
-		restoreFromBranch(ctx);
-		syncActiveTools(pi);
-		publish(pi);
+		const currentState = restoreFromBranch(ctx);
+		syncActiveTools(pi, currentState);
+		publish(pi, currentState);
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
-		restoreFromBranch(ctx);
-		syncActiveTools(pi);
-		publish(pi);
+		const currentState = restoreFromBranch(ctx);
+		syncActiveTools(pi, currentState);
+		publish(pi, currentState);
 	});
 
 	pi.registerCommand("codex-search", {
@@ -315,17 +362,18 @@ export default function codexSearch(pi: ExtensionAPI) {
 			let changed = false;
 
 			if (!lower || lower === "status") {
-				ctx.ui.notify(`Codex search: ${formatState()}`, "info");
+				ctx.ui.notify(`Codex search: ${formatState(getState(ctx))}`, "info");
 				return;
 			}
 
 			const mode = parseMode(lower);
 			const access = parseAccess(lower);
+			const currentState = { ...getState(ctx) };
 			if (mode) {
-				state.mode = mode;
+				currentState.mode = mode;
 				changed = true;
 			} else if (access) {
-				state.access = access;
+				currentState.access = access;
 				changed = true;
 			} else if (lower.startsWith("context ")) {
 				const size = parseContextSize(lower.slice("context ".length).trim());
@@ -333,14 +381,14 @@ export default function codexSearch(pi: ExtensionAPI) {
 					ctx.ui.notify("Usage: /codex-search context low|medium|high", "warning");
 					return;
 				}
-				state.contextSize = size;
+				currentState.contextSize = size;
 				changed = true;
 			} else if (lower.startsWith("domains ")) {
 				const domainText = raw.slice("domains ".length).trim();
 				if (domainText.toLowerCase() === "clear" || !domainText) {
-					state.allowedDomains = undefined;
+					currentState.allowedDomains = undefined;
 				} else {
-					state.allowedDomains = domainText.split(/[\s,]+/).map((d) => d.trim()).filter(Boolean);
+					currentState.allowedDomains = domainText.split(/[\s,]+/).map((d) => d.trim()).filter(Boolean);
 				}
 				changed = true;
 			} else {
@@ -349,11 +397,12 @@ export default function codexSearch(pi: ExtensionAPI) {
 			}
 
 			if (changed) {
-				persist(pi);
-				syncActiveTools(pi);
-				publish(pi);
+				setState(ctx, currentState);
+				persist(pi, currentState);
+				syncActiveTools(pi, currentState);
+				publish(pi, currentState);
 			}
-			ctx.ui.notify(`Codex search: ${formatState()}`, "info");
+			ctx.ui.notify(`Codex search: ${formatState(currentState)}`, "info");
 		},
 	});
 
@@ -380,8 +429,9 @@ export default function codexSearch(pi: ExtensionAPI) {
 			return new Text(output ? theme.fg("toolOutput", output) : theme.fg("muted", "No web.run output."), 0, 0);
 		},
 		async execute(_toolCallId, params: WebRunParams, signal, onUpdate, ctx) {
-			if (state.mode !== "standalone" && state.mode !== "both") {
-				throw new Error(`web_run is disabled because Codex search mode is '${state.mode}'. Use /codex-search standalone or /codex-search both.`);
+			const currentState = getState(ctx);
+			if (currentState.mode !== "standalone" && currentState.mode !== "both") {
+				throw new Error(`web_run is disabled because Codex search mode is '${currentState.mode}'. Use /codex-search standalone or /codex-search both.`);
 			}
 			if (!hasCommand(params)) {
 				throw new Error("web_run requires at least one command: search_query, image_query, open, click, find, screenshot, finance, weather, sports, or time.");
@@ -408,9 +458,9 @@ export default function codexSearch(pi: ExtensionAPI) {
 				commands: compactObject(params as Record<string, unknown>),
 				settings: compactObject({
 					allowed_callers: ["direct"],
-					external_web_access: externalWebAccess(state.access),
-					search_context_size: state.contextSize,
-					filters: state.allowedDomains?.length ? { allowed_domains: state.allowedDomains } : undefined,
+					external_web_access: externalWebAccess(currentState.access),
+					search_context_size: currentState.contextSize,
+					filters: currentState.allowedDomains?.length ? { allowed_domains: currentState.allowedDomains } : undefined,
 				}),
 				max_output_tokens: 12_000,
 			});
@@ -438,7 +488,7 @@ export default function codexSearch(pi: ExtensionAPI) {
 				throw new Error(`Codex alpha/search request failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 
-			const rawText = await response.text();
+			const rawText = await readResponseText(response, MAX_RAW_RESPONSE_CHARS);
 			let data: SearchResponse & Record<string, unknown>;
 			try {
 				data = rawText ? JSON.parse(rawText) : {};
@@ -463,13 +513,14 @@ export default function codexSearch(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		if (state.mode !== "hosted" && state.mode !== "both") return;
+		const currentState = getState(ctx);
+		if (currentState.mode !== "hosted" && currentState.mode !== "both") return;
 		if (ctx.model?.provider !== "openai-codex") return;
 		const payload = event.payload as any;
 		if (!payload || typeof payload !== "object") return;
 		if (!Array.isArray(payload.tools)) payload.tools = [];
 		if (payload.tools.some((tool: any) => tool?.type === "web_search")) return payload;
-		payload.tools.push(hostedWebSearchTool());
+		payload.tools.push(hostedWebSearchTool(currentState));
 		return payload;
 	});
 }

@@ -27,6 +27,7 @@ export default function statusBarExtension(pi: ExtensionAPI) {
 		severity: "dim",
 	};
 	let render: (() => void) | undefined;
+	let activeFooter: symbol | undefined;
 
 	function requestRender() {
 		render?.();
@@ -51,6 +52,10 @@ export default function statusBarExtension(pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 
 		fastEnabled = true;
+		quota = {
+			text: "Codex quota: loading…",
+			severity: "dim",
+		};
 		const savedFast = ctx.sessionManager
 			.getBranch()
 			.filter((entry: { type: string; customType?: string }) => {
@@ -62,14 +67,20 @@ export default function statusBarExtension(pi: ExtensionAPI) {
 		}
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			render = () => tui.requestRender();
-			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
+				const footerToken = Symbol("status-footer");
+				activeFooter = footerToken;
+				const footerRender = () => tui.requestRender();
+				render = footerRender;
+				const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
 
-			return {
-				dispose() {
-					unsubscribeBranch();
-					render = undefined;
-				},
+				return {
+					dispose() {
+						unsubscribeBranch();
+						if (activeFooter === footerToken) {
+							activeFooter = undefined;
+							render = undefined;
+						}
+					},
 				invalidate() {},
 				render(width: number): string[] {
 					const stats = getSessionStats(ctx);
@@ -111,9 +122,6 @@ export default function statusBarExtension(pi: ExtensionAPI) {
 		});
 	});
 
-	pi.on("session_shutdown", () => {
-		render = undefined;
-	});
 }
 
 function isQuotaState(value: unknown): value is QuotaState {
