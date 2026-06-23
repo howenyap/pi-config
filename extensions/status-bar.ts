@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { basename } from "node:path";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 type QuotaSeverity = "dim" | "success" | "warning" | "error";
 
@@ -15,6 +15,7 @@ const FAST_MODE_MODEL_IDS = new Set(["gpt-5.5", "gpt-5.4"]);
 const FAST_STATE_ENTRY_TYPE = "codex-fast";
 const FAST_STATE_EVENT = "codex-fast:state";
 const QUOTA_STATE_EVENT = "codex-quota:state";
+const MOBILE_FOOTER_WIDTH = 80;
 
 function fastAppliesTo(model: any) {
 	return !!model && model.provider === "openai-codex" && FAST_MODE_MODEL_IDS.has(model.id);
@@ -113,9 +114,10 @@ export default function statusBarExtension(pi: ExtensionAPI) {
 						.join("  ");
 					const quotaText = colorQuotaText(theme, quota);
 
+					const mobileLayout = width <= MOBILE_FOOTER_WIDTH;
 					return [
-						alignLine(left, right, width),
-						alignLine(theme.fg("dim", statuses), quotaText, width),
+						...formatStatusPair(left, right, width, mobileLayout),
+						...formatStatusPair(theme.fg("dim", statuses), quotaText, width, mobileLayout),
 					];
 				},
 			};
@@ -165,6 +167,19 @@ function formatCount(n: number): string {
 	if (n < 1_000) return String(n);
 	if (n < 1_000_000) return `${(n / 1_000).toFixed(1)}k`;
 	return `${(n / 1_000_000).toFixed(1)}m`;
+}
+
+function formatStatusPair(left: string, right: string, width: number, stacked: boolean): string[] {
+	if (width <= 0) return [""];
+	if (!stacked) return [alignLine(left, right, width)];
+
+	const lines = [...wrapStatusLine(left, width), ...wrapStatusLine(right, width)];
+	return lines.length ? lines : [""];
+}
+
+function wrapStatusLine(text: string, width: number): string[] {
+	if (visibleWidth(text) <= 0) return [];
+	return wrapTextWithAnsi(text, width).filter((line) => visibleWidth(line) > 0);
 }
 
 function alignLine(left: string, right: string, width: number): string {
